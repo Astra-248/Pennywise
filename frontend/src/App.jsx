@@ -11,9 +11,8 @@ import {
 } from "recharts";
 import "./App.css";
 
-const API = "http://localhost:5000/api/expenses";
-const BUDGET_API = "http://localhost:5000/api/budget";
-
+const API = "https://pennywise-backend-7m29.onrender.com/api/expenses";
+const BUDGET_API = "https://pennywise-backend-7m29.onrender.com/api/budget";
 const categories = ["Food", "Travel", "Bills", "Shopping", "Education", "Other"];
 
 function getCurrentMonth() {
