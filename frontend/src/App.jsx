@@ -1,5 +1,14 @@
 
 import { useEffect, useMemo, useState } from "react";
+import {
+  ResponsiveContainer,
+  AreaChart,
+  Area,
+  XAxis,
+  YAxis,
+  CartesianGrid,
+  Tooltip
+} from "recharts";
 import "./App.css";
 
 const API = "http://localhost:5000/api/expenses";
@@ -26,6 +35,18 @@ function money(amount) {
   });
 }
 
+function formatDateKey(value) {
+  const parsed = new Date(value);
+
+  if (Number.isNaN(parsed.getTime())) {
+    return "";
+  }
+
+  return parsed.getFullYear() + "-" +
+      String(parsed.getMonth() + 1).padStart(2, "0") + "-" +
+      String(parsed.getDate()).padStart(2, "0");
+}
+
 function App() {
   const [expenses, setExpenses] = useState([]);
   const [title, setTitle] = useState("");
@@ -45,6 +66,8 @@ function App() {
   const [endDate, setEndDate] = useState("");
   const [sortOrder, setSortOrder] = useState("newest");
   const [loading, setLoading] = useState(true);
+
+  const [trendRange, setTrendRange] = useState("1M");
 
   async function loadExpenses() {
     try {
@@ -92,6 +115,7 @@ function App() {
   const monthExpenses = useMemo(() => {
     return expenses.filter((expense) => {
       const expenseDate = new Date(expense.date);
+
       if (Number.isNaN(expenseDate.getTime())) {
         return false;
       }
@@ -109,6 +133,7 @@ function App() {
   );
 
   const remaining = budget - monthlySpent;
+
   const budgetPercent = budget > 0
       ? Math.min((monthlySpent / budget) * 100, 100)
       : 0;
@@ -138,21 +163,108 @@ function App() {
 
   const dailyAverage = currentDay > 0 ? monthlySpent / currentDay : 0;
 
+  const trendDays = {
+    "1W": 7,
+    "1M": 30,
+    "3M": 90,
+    "6M": 180
+  }[trendRange];
+
+  const trendSummary = useMemo(() => {
+    const [year, month] = selectedMonth.split("-").map(Number);
+    const today = new Date();
+
+    const endDate = selectedMonth === getCurrentMonth()
+        ? new Date(today.getFullYear(), today.getMonth(), today.getDate())
+        : new Date(year, month, 0);
+
+    endDate.setHours(0, 0, 0, 0);
+
+    const startDate = new Date(endDate);
+    startDate.setDate(startDate.getDate() - trendDays + 1);
+
+    const previousStart = new Date(startDate);
+    previousStart.setDate(previousStart.getDate() - trendDays);
+
+    function dateKey(dateValue) {
+      return dateValue.getFullYear() + "-" +
+          String(dateValue.getMonth() + 1).padStart(2, "0") + "-" +
+          String(dateValue.getDate()).padStart(2, "0");
+    }
+
+    const dailyTotals = {};
+    let currentTotal = 0;
+    let previousTotal = 0;
+
+    expenses.forEach((expense) => {
+      const parsedDate = new Date(expense.date);
+
+      if (Number.isNaN(parsedDate.getTime())) {
+        return;
+      }
+
+      const expenseDate = new Date(
+          parsedDate.getFullYear(),
+          parsedDate.getMonth(),
+          parsedDate.getDate()
+      );
+
+      const value = Number(expense.amount) || 0;
+
+      if (expenseDate >= startDate && expenseDate <= endDate) {
+        const key = dateKey(expenseDate);
+        dailyTotals[key] = (dailyTotals[key] || 0) + value;
+        currentTotal += value;
+      } else if (
+          expenseDate >= previousStart &&
+          expenseDate < startDate
+      ) {
+        previousTotal += value;
+      }
+    });
+
+    const data = [];
+
+    for (
+        let day = new Date(startDate);
+        day <= endDate;
+        day.setDate(day.getDate() + 1)
+    ) {
+      const key = dateKey(day);
+
+      data.push({
+        date: key,
+        label: day.toLocaleDateString("en-IN", {
+          day: "numeric",
+          month: "short"
+        }),
+        spending: dailyTotals[key] || 0
+      });
+    }
+
+    const percentageChange = previousTotal > 0
+        ? ((currentTotal - previousTotal) / previousTotal) * 100
+        : null;
+
+    return {
+      data,
+      currentTotal,
+      previousTotal,
+      percentageChange
+    };
+  }, [expenses, selectedMonth, trendDays]);
+
   const filteredExpenses = useMemo(() => {
     let result = [...monthExpenses];
 
     result = result.filter((expense) => {
       const matchesSearch =
-          expense.title.toLowerCase().includes(search.toLowerCase());
+          String(expense.title || "").toLowerCase().includes(search.toLowerCase());
 
       const matchesCategory =
           filterCategory === "All" || expense.category === filterCategory;
 
-      const expenseDate = new Date(expense.date);
-      const dateString =
-          expenseDate.getFullYear() + "-" +
-          String(expenseDate.getMonth() + 1).padStart(2, "0") + "-" +
-          String(expenseDate.getDate()).padStart(2, "0");
+      const dateString = formatDateKey(expense.date);
 
       const matchesStart = !startDate || dateString >= startDate;
       const matchesEnd = !endDate || dateString <= endDate;
@@ -228,7 +340,12 @@ function App() {
 
       const wasEditing = Boolean(editId);
       resetForm();
-      setMessage(wasEditing ? "Expense updated successfully." : "Expense added successfully.");
+
+      setMessage(
+          wasEditing
+              ? "Expense updated successfully."
+              : "Expense added successfully."
+      );
 
       await loadExpenses();
     } catch (error) {
@@ -240,7 +357,7 @@ function App() {
     setTitle(expense.title);
     setAmount(String(expense.amount));
     setCategory(expense.category);
-    setDate(new Date(expense.date).toISOString().slice(0, 10));
+    setDate(formatDateKey(expense.date));
     setEditId(expense._id);
     setMessage("");
     setActivePage("Transactions");
@@ -312,6 +429,48 @@ function App() {
     setMessage("");
   }
 
+  // Export the currently filtered transactions as a CSV file.
+  function exportCSV() {
+    if (filteredExpenses.length === 0) {
+      setMessage("There are no transactions to export.");
+      return;
+    }
+
+    const headers = ["Expense", "Category", "Date", "Amount"];
+
+    const rows = filteredExpenses.map((expense) => [
+      expense.title,
+      expense.category,
+      formatDateKey(expense.date),
+      Number(expense.amount).toFixed(2)
+    ]);
+
+    function escapeCSV(value) {
+      return '"' + String(value ?? "").replace(/"/g, '""') + '"';
+    }
+
+    const csvContent = [
+      headers.map(escapeCSV).join(","),
+      ...rows.map((row) => row.map(escapeCSV).join(","))
+    ].join("\r\n");
+
+    const blob = new Blob(["\uFEFF" + csvContent], {
+      type: "text/csv;charset=utf-8;"
+    });
+
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+
+    link.href = url;
+    link.download = "pennywise-transactions.csv";
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
+
+    setMessage("Transactions exported successfully.");
+  }
+
   function renderExpenseForm() {
     return (
         <section className="panel form-panel">
@@ -320,8 +479,13 @@ function App() {
               <p className="eyebrow">TRANSACTION DETAILS</p>
               <h2>{editId ? "Edit expense" : "Add an expense"}</h2>
             </div>
+
             {editId && (
-                <button type="button" className="secondary-btn" onClick={resetForm}>
+                <button
+                    type="button"
+                    className="secondary-btn"
+                    onClick={resetForm}
+                >
                   Cancel edit
                 </button>
             )}
@@ -448,6 +612,14 @@ function App() {
               <button
                   className="secondary-btn"
                   type="button"
+                  onClick={exportCSV}
+              >
+                Export CSV ↓
+              </button>
+
+              <button
+                  className="secondary-btn"
+                  type="button"
                   onClick={() => {
                     setSearch("");
                     setFilterCategory("All");
@@ -482,21 +654,26 @@ function App() {
                       <th>Actions</th>
                     </tr>
                     </thead>
+
                     <tbody>
                     {filteredExpenses.map((expense) => (
                         <tr key={expense._id}>
                           <td className="expense-name">{expense.title}</td>
+
                           <td>
-                                                <span className="category-tag">
-                                                    {expense.category}
-                                                </span>
+                            <span className="category-tag">
+                              {expense.category}
+                            </span>
                           </td>
+
                           <td>
                             {new Date(expense.date).toLocaleDateString("en-IN")}
                           </td>
+
                           <td className="amount-cell">
                             {money(expense.amount)}
                           </td>
+
                           <td>
                             <div className="row-actions">
                               <button
@@ -505,6 +682,7 @@ function App() {
                               >
                                 Edit
                               </button>
+
                               <button
                                   className="delete-btn"
                                   onClick={() => handleDelete(expense._id)}
@@ -530,6 +708,7 @@ function App() {
           <section className="panel budget-panel">
             <p className="eyebrow">YOUR MONTHLY LIMIT</p>
             <h2>Set your student budget</h2>
+
             <p className="muted">
               Choose how much you can spend this month. Pennywise will
               compare your recorded expenses with your limit.
@@ -571,7 +750,10 @@ function App() {
 
             {budget > 0 ? (
                 <>
-                  <p className="muted">of {money(budget)} planned this month</p>
+                  <p className="muted">
+                    of {money(budget)} planned this month
+                  </p>
+
                   <div className="progress-track">
                     <div
                         className={
@@ -581,20 +763,27 @@ function App() {
                         style={{ width: budgetPercent + "%" }}
                     />
                   </div>
+
                   <p className="progress-label">
                     {Math.round((monthlySpent / budget) * 100)}% used
                   </p>
+
                   <div className="budget-remaining">
-                    <span>{remaining >= 0 ? "Still available" : "Over budget"}</span>
+                    <span>
+                      {remaining >= 0 ? "Still available" : "Over budget"}
+                    </span>
+
                     <strong className={remaining < 0 ? "danger-text" : ""}>
                       {money(Math.abs(remaining))}
                     </strong>
                   </div>
+
                   {monthlySpent >= budget && (
                       <p className="alert-message">
                         You've reached or exceeded your monthly budget.
                       </p>
                   )}
+
                   {monthlySpent >= budget * 0.8 && monthlySpent < budget && (
                       <p className="warning-message">
                         You've used at least 80% of your budget. Spend carefully.
@@ -602,7 +791,9 @@ function App() {
                   )}
                 </>
             ) : (
-                <p className="muted">Your spending progress will appear here.</p>
+                <p className="muted">
+                  Your spending progress will appear here.
+                </p>
             )}
           </section>
         </div>
@@ -626,12 +817,14 @@ function App() {
             >
               <span className="nav-icon">⌂</span> Overview
             </button>
+
             <button
                 className={activePage === "Transactions" ? "nav-item active" : "nav-item"}
                 onClick={() => changePage("Transactions")}
             >
               <span className="nav-icon">↔</span> Transactions
             </button>
+
             <button
                 className={activePage === "Budget" ? "nav-item active" : "nav-item"}
                 onClick={() => changePage("Budget")}
@@ -645,6 +838,7 @@ function App() {
               <span className="note-symbol">✳</span>
               <p>Small choices today. More freedom tomorrow.</p>
             </div>
+
             <span className="sidebar-caption">PERSONAL FINANCE · 2026</span>
           </div>
         </aside>
@@ -653,8 +847,14 @@ function App() {
           <header className="topbar">
             <div>
               <span className="topbar-label">YOUR PERSONAL FINANCE SPACE</span>
-              <h1>{activePage === "Overview" ? "Overview" :
-                  activePage === "Transactions" ? "Transactions" : "Budget planner"}</h1>
+
+              <h1>
+                {activePage === "Overview"
+                    ? "Overview"
+                    : activePage === "Transactions"
+                        ? "Transactions"
+                        : "Budget planner"}
+              </h1>
             </div>
 
             <label className="month-picker">
@@ -670,7 +870,11 @@ function App() {
           {message && (
               <div className="message" role="status">
                 <span>{message}</span>
-                <button onClick={() => setMessage("")} aria-label="Dismiss message">
+
+                <button
+                    onClick={() => setMessage("")}
+                    aria-label="Dismiss message"
+                >
                   ×
                 </button>
               </div>
@@ -682,10 +886,12 @@ function App() {
                   <div>
                     <p className="eyebrow">A CLEARER VIEW OF YOUR MONEY</p>
                     <h2>Make your money work for you.</h2>
+
                     <p className="muted">
                       Track the little things. Stay ready for the big things.
                     </p>
                   </div>
+
                   <button
                       className="primary-btn"
                       onClick={() => {
@@ -703,6 +909,7 @@ function App() {
                       <span>MONTHLY SPENDING</span>
                       <span className="stat-symbol">₹</span>
                     </div>
+
                     <h2>{money(monthlySpent)}</h2>
                     <p>{monthExpenses.length} expenses recorded</p>
                   </article>
@@ -712,19 +919,35 @@ function App() {
                       <span>MONTHLY BUDGET</span>
                       <span className="stat-symbol">◷</span>
                     </div>
+
                     <h2>{budget > 0 ? money(budget) : "Not set"}</h2>
-                    <p>{budget > 0 ? "Your spending limit" : "Set a limit to stay on track"}</p>
+
+                    <p>
+                      {budget > 0
+                          ? "Your spending limit"
+                          : "Set a limit to stay on track"}
+                    </p>
                   </article>
 
                   <article className="stat-card">
                     <div className="stat-top">
-                      <span>{remaining < 0 ? "OVER BUDGET" : "LEFT TO SPEND"}</span>
+                      <span>
+                        {remaining < 0 ? "OVER BUDGET" : "LEFT TO SPEND"}
+                      </span>
                       <span className="stat-symbol">↗</span>
                     </div>
+
                     <h2 className={remaining < 0 ? "danger-text" : ""}>
                       {budget > 0 ? money(Math.abs(remaining)) : "—"}
                     </h2>
-                    <p>{budget > 0 ? (remaining < 0 ? "Above your monthly limit" : "Available this month") : "Budget required for calculation"}</p>
+
+                    <p>
+                      {budget > 0
+                          ? remaining < 0
+                              ? "Above your monthly limit"
+                              : "Available this month"
+                          : "Budget required for calculation"}
+                    </p>
                   </article>
 
                   <article className="stat-card">
@@ -732,6 +955,7 @@ function App() {
                       <span>DAILY AVERAGE</span>
                       <span className="stat-symbol">⌁</span>
                     </div>
+
                     <h2>{money(dailyAverage)}</h2>
                     <p>Monthly spend divided by elapsed days</p>
                   </article>
@@ -744,8 +968,12 @@ function App() {
                           <p className="eyebrow">BUDGET GUARD</p>
                           <h2>Your monthly progress</h2>
                         </div>
-                        <strong>{Math.round((monthlySpent / budget) * 100)}%</strong>
+
+                        <strong>
+                          {Math.round((monthlySpent / budget) * 100)}%
+                        </strong>
                       </div>
+
                       <div className="progress-track">
                         <div
                             className={
@@ -755,15 +983,18 @@ function App() {
                             style={{ width: budgetPercent + "%" }}
                         />
                       </div>
+
                       <div className="progress-foot">
                         <span>{money(monthlySpent)} spent</span>
                         <span>{money(budget)} budget</span>
                       </div>
+
                       {monthlySpent >= budget && (
                           <p className="alert-message">
                             Your spending has reached or exceeded your budget.
                           </p>
                       )}
+
                       {monthlySpent >= budget * 0.8 && monthlySpent < budget && (
                           <p className="warning-message">
                             You've used at least 80% of your budget.
@@ -771,6 +1002,204 @@ function App() {
                       )}
                     </section>
                 )}
+
+                <section className="panel trend-panel">
+                  <div className="panel-heading trend-heading">
+                    <div>
+                      <p className="eyebrow">YOUR SPENDING, OVER TIME</p>
+                      <h2>Spending trends</h2>
+                      <p className="muted">
+                        Daily spending across your selected period
+                      </p>
+                    </div>
+
+                    <div className="trend-periods">
+                      {["1W", "1M", "3M", "6M"].map((range) => (
+                          <button
+                              key={range}
+                              type="button"
+                              className={
+                                trendRange === range
+                                    ? "trend-period active"
+                                    : "trend-period"
+                              }
+                              onClick={() => setTrendRange(range)}
+                          >
+                            {range}
+                          </button>
+                      ))}
+                    </div>
+                  </div>
+
+                  <div className="trend-summary">
+                    <div>
+                      <p className="muted">Spent during this period</p>
+                      <h2>{money(trendSummary.currentTotal)}</h2>
+                    </div>
+
+                    <div className="trend-comparison">
+                      {trendSummary.percentageChange !== null ? (
+                          <>
+                            <span
+                                className={
+                                  trendSummary.percentageChange > 0
+                                      ? "trend-change trend-up"
+                                      : trendSummary.percentageChange < 0
+                                          ? "trend-change trend-down"
+                                          : "trend-change"
+                                }
+                            >
+                              {trendSummary.percentageChange > 0
+                                  ? "↑ "
+                                  : trendSummary.percentageChange < 0
+                                      ? "↓ "
+                                      : ""}
+                              {Math.abs(
+                                  trendSummary.percentageChange
+                              ).toFixed(1)}%
+                            </span>
+
+                            <span className="muted">
+                              vs previous period
+                            </span>
+                          </>
+                      ) : (
+                          <span className="muted">
+                            No previous spending to compare
+                          </span>
+                      )}
+                    </div>
+                  </div>
+
+                  {loading ? (
+                      <div className="empty trend-empty">
+                        <h3>Loading spending data...</h3>
+                      </div>
+                  ) : trendSummary.currentTotal === 0 ? (
+                      <div className="empty trend-empty">
+                        <h3>No spending in this period</h3>
+                        <p>
+                          Expenses you record during this period will appear here.
+                        </p>
+                      </div>
+                  ) : (
+                      <div className="trend-chart">
+                        <ResponsiveContainer width="100%" height="100%">
+                          <AreaChart
+                              data={trendSummary.data}
+                              margin={{
+                                top: 12,
+                                right: 12,
+                                left: 4,
+                                bottom: 4
+                              }}
+                          >
+                            <defs>
+                              <linearGradient
+                                  id="spendingFill"
+                                  x1="0"
+                                  y1="0"
+                                  x2="0"
+                                  y2="1"
+                              >
+                                <stop
+                                    offset="0%"
+                                    stopColor="#10b981"
+                                    stopOpacity={0.3}
+                                />
+
+                                <stop
+                                    offset="95%"
+                                    stopColor="#10b981"
+                                    stopOpacity={0.01}
+                                />
+                              </linearGradient>
+                            </defs>
+
+                            <CartesianGrid
+                                stroke="#2a3334"
+                                strokeDasharray="3 5"
+                                vertical={false}
+                            />
+
+                            <XAxis
+                                dataKey="label"
+                                tick={{ fill: "#929c9b", fontSize: 11 }}
+                                tickLine={false}
+                                axisLine={false}
+                                minTickGap={24}
+                                interval="preserveStartEnd"
+                            />
+
+                            <YAxis
+                                tickFormatter={(value) =>
+                                    value >= 1000
+                                        ? "₹" + (value / 1000).toFixed(1) + "k"
+                                        : "₹" + value
+                                }
+                                tick={{
+                                  fill: "#929c9b",
+                                  fontSize: 11
+                                }}
+                                tickLine={false}
+                                axisLine={false}
+                                width={58}
+                            />
+
+                            <Tooltip
+                                contentStyle={{
+                                  backgroundColor: "#151b1b",
+                                  border: "1px solid #34403e",
+                                  borderRadius: "10px",
+                                  color: "#f2f5f4"
+                                }}
+                                labelStyle={{ color: "#a9b5b2" }}
+                                formatter={(value) => [
+                                  money(value),
+                                  "Spent"
+                                ]}
+                                labelFormatter={(label, items) =>
+                                    items && items.length > 0
+                                        ? new Date(
+                                            items[0].payload.date + "T12:00:00"
+                                        ).toLocaleDateString("en-IN", {
+                                          day: "numeric",
+                                          month: "long",
+                                          year: "numeric"
+                                        })
+                                        : label
+                                }
+                            />
+
+                            <Area
+                                type="monotone"
+                                dataKey="spending"
+                                name="Daily spending"
+                                stroke="#10b981"
+                                strokeWidth={2.5}
+                                fill="url(#spendingFill)"
+                                activeDot={{
+                                  r: 5,
+                                  fill: "#10b981",
+                                  stroke: "#d1fae5",
+                                  strokeWidth: 2
+                                }}
+                                isAnimationActive={true}
+                                animationDuration={650}
+                            />
+                          </AreaChart>
+                        </ResponsiveContainer>
+                      </div>
+                  )}
+
+                  <div className="trend-footnote">
+                    <span className="trend-legend-dot" />
+                    <span>Daily expenses</span>
+                    <span className="muted">
+                      · Only recorded transactions are included
+                    </span>
+                  </div>
+                </section>
 
                 <div className="content-grid">
                   <section className="panel">
@@ -798,15 +1227,17 @@ function App() {
                                     <span>{name}</span>
                                     <strong>{money(total)}</strong>
                                   </div>
+
                                   <div className="progress-track category-track">
                                     <div
                                         className="progress-fill"
                                         style={{ width: percent + "%" }}
                                     />
                                   </div>
+
                                   <span className="category-percent">
-                                                        {Math.round(percent)}% of monthly spending
-                                                    </span>
+                                    {Math.round(percent)}% of monthly spending
+                                  </span>
                                 </div>
                             );
                           })}
@@ -816,10 +1247,12 @@ function App() {
 
                   <section className="panel insight-panel">
                     <p className="eyebrow">A QUICK INSIGHT</p>
+
                     {highestCategory ? (
                         <>
                           <span className="insight-mark">↗</span>
                           <h2>{highestCategory[0]} is your top category.</h2>
+
                           <p className="muted">
                             You spent {money(highestCategory[1])} on{" "}
                             {highestCategory[0].toLowerCase()} this month.
@@ -829,6 +1262,7 @@ function App() {
                         <>
                           <span className="insight-mark">✳</span>
                           <h2>Your money story starts here.</h2>
+
                           <p className="muted">
                             Add expenses to discover your spending patterns.
                           </p>
@@ -856,12 +1290,15 @@ function App() {
                   <div>
                     <p className="eyebrow">PLAN BEFORE YOU SPEND</p>
                     <h2>Give every rupee a purpose.</h2>
+
                     <p className="muted">
                       Your budget is saved by month and stays available after refresh.
                     </p>
                   </div>
                 </section>
+
                 {renderBudget()}
+
                 <section className="panel budget-expenses">
                   <div className="panel-heading">
                     <div>
@@ -869,18 +1306,22 @@ function App() {
                       <h2>Spending summary</h2>
                     </div>
                   </div>
+
                   <div className="budget-summary-row">
                     <span>Total spent</span>
                     <strong>{money(monthlySpent)}</strong>
                   </div>
+
                   <div className="budget-summary-row">
                     <span>Budget</span>
                     <strong>{budget > 0 ? money(budget) : "Not set"}</strong>
                   </div>
+
                   <div className="budget-summary-row">
                     <span>Transactions</span>
                     <strong>{monthExpenses.length}</strong>
                   </div>
+
                   <div className="budget-summary-row">
                     <span>Highest spending category</span>
                     <strong>
