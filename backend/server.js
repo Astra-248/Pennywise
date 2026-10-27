@@ -5,14 +5,18 @@ const cors = require("cors");
 require("dotenv").config();
 
 const app = express();
+
 const expenseRoutes = require("./routes/expenseRoutes");
+const budgetRoutes = require("./routes/budgetRoutes");
 
 app.use(cors());
 app.use(express.json());
+
 app.use("/api/expenses", expenseRoutes);
+app.use("/api/budget", budgetRoutes);
 
 app.get("/", (req, res) => {
-    res.send("Expense Tracker API is running");
+    res.send("Pennywise API is running");
 });
 
 const PORT = process.env.PORT || 5000;
